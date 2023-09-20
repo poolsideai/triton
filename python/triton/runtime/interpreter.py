@@ -1,10 +1,12 @@
 import inspect
 
 import numpy as np
+from ml_dtypes import bfloat16
 
 import triton
 import triton.language as tl
 from .._C.libtriton.triton import interpreter as _interpreter
+from .._C.libtriton.triton import ir
 
 
 # TODO: duplicate
@@ -112,8 +114,36 @@ class Builder:
             tl.uint32: np.dtype(np.uint32),
             tl.int64: np.dtype(np.int64),
             tl.uint64: np.dtype(np.uint64),
+            tl.bfloat16: np.dtype(bfloat16),
         }
         return np_types[tt_dtype]
+
+    def tl_dtype(self, np_dtype):
+        if np_dtype == np.float16:
+            return tl.float16
+        if np_dtype == np.float32:
+            return tl.float32
+        if np_dtype == np.float64:
+            return tl.float64
+        if np_dtype == np.int8:
+            return tl.int8
+        if np_dtype == np.uint8:
+            return tl.uint8
+        if np_dtype == np.int16:
+            return tl.int16
+        if np_dtype == np.uint16:
+            return tl.uint16
+        if np_dtype == np.int32:
+            return tl.int32
+        if np_dtype == np.uint32:
+            return tl.uint32
+        if np_dtype == np.int64:
+            return tl.int64
+        if np_dtype == np.uint64:
+            return tl.uint64
+        if np_dtype == np.bool_:
+            return tl.int1
+        raise TypeError(f'Unsupported type {np_dtype} for tl_dtype')
 
     # constants
     def get_half_ty(self):
@@ -122,8 +152,17 @@ class Builder:
     def get_float_ty(self):
         return tl.float32
 
+    def get_double_ty(self):
+        return tl.float64
+
+    def get_int32_ty(self):
+        return tl.int32
+
     def get_int64_ty(self):
         return tl.int64
+
+    def get_bf16_ty(self):
+        return tl.bfloat16
 
     def get_ptr_ty(self, elt_ty, addr_space):
         return tl.pointer_type(elt_ty, addr_space)
@@ -145,6 +184,9 @@ class Builder:
 
     def get_null_value(self, type):
         return TensorHandle(np.array([0], dtype=self.np_dtype(type)), type)
+
+    def get_numpy(self, np_array):
+        return TensorHandle(np_array, self.tl_dtype(np_array.dtype))
 
     # programming model
     def create_get_program_id(self, axis):
@@ -309,8 +351,29 @@ class Builder:
     # def create_atomic_cas(self, ptr, cmp, val, sem):
     #     pass
 
-    # def create_atomic_rmw(self, rmwOp, ptr, val, mask, sem):
-    #     pass
+    def create_atomic_rmw(self, rmwOp, ptr, val, mask, sem):
+        handle = self.create_masked_load(ptr, mask, None, None, None, None)
+        if rmwOp == ir.ATOMIC_OP.MAX:
+            ret = self.create_maxf(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.UMAX:
+            ret = self.create_maxui(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.UMIN:
+            ret = self.create_minui(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.MIN:
+            ret = self.create_minf(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.FADD:
+            ret = self.create_add(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.ADD:
+            ret = self.create_add(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.AND:
+            ret = self.create_and(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.OR:
+            ret = self.create_or(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.XOR:
+            ret = self.create_xor(handle, val)
+        elif rmwOp == ir.ATOMIC_OP.XCHG:
+            raise NotImplementedError()
+        return self.create_masked_store(ptr, ret, mask, None, None)
 
     # def create_extern_elementwise(self, libName, libPath, symbol, argList, retType, isPure):
     #     pass
@@ -371,7 +434,11 @@ def _patch_lang_tensor(tensor, builder):
     tensor.__index__ = lambda self: int(self.handle.data)
     tensor.__bool__ = lambda self: True
     tensor.__str__ = lambda self: str(self.handle.data)
-    tensor.__getitem__ = lambda self, slices: self.handle.data.__getitem__(slices)
+    def __getitem__(self, slices):
+        slice = self.handle.data.__getitem__(slices)
+        ret_ty = tl.block_type(self.dtype, slice.shape)
+        return tl.tensor(builder.get_numpy(slice), ret_ty)
+    tensor.__getitem__ = __getitem__
 
 
 def _patch_lang_core(lang, builder):
